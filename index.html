@@ -1,0 +1,662 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>AAC Talk Board</title>
+<!--
+  =====================================================================
+  AAC TALK BOARD — single-file web app
+  ---------------------------------------------------------------------
+  HOW IT WORKS
+  • Tap a tile → it speaks (custom recorded/uploaded audio if present,
+    otherwise the device's text-to-speech voice) and is added to the
+    sentence strip at the top.
+  • "Speak" plays the whole sentence; ⌫ removes the last word; ✕ clears.
+  • Edit mode: PRESS AND HOLD the "Edit" button (stops children entering
+    it by accident). In edit mode you can:
+      - add / edit / delete tiles
+      - upload a photo, use an image URL, or use an emoji
+      - record audio with the microphone or upload an audio file
+      - add / rename / delete categories, and reorder tiles
+  • Everything is saved in the browser (IndexedDB) on that device.
+    Use Export / Import to back up or copy a board to another device.
+
+  FOR DEVELOPERS
+  • Change the starting board in DEFAULT_BOARD (in the <script> below).
+    "image" and "audio" can point at files in folders next to this page,
+    e.g. image: "images/apple.png", audio: "audio/apple.mp3".
+  • Change colours in COLOURS, voice/language in SETTINGS.
+  • Microphone recording needs https (or localhost). Hosting on
+    GitHub Pages / Netlify / your own https server works well.
+  =====================================================================
+-->
+<style>
+  :root{
+    --bg:#f6f4ef; --panel:#ffffff; --ink:#1f2328; --muted:#6b7280;
+    --accent:#2563eb; --danger:#dc2626; --radius:16px;
+    --tile-size:clamp(96px, 15vw, 150px);
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);
+    font-family:system-ui,-apple-system,"Segoe UI",Roboto,Arial,sans-serif;
+    -webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
+  body{display:flex;flex-direction:column}
+  button{font:inherit;cursor:pointer;border:none;border-radius:12px}
+
+  /* Sentence strip */
+  .strip{display:flex;gap:8px;align-items:stretch;padding:10px;background:var(--panel);
+    box-shadow:0 2px 6px rgba(0,0,0,.08);position:sticky;top:0;z-index:5}
+  .sentence{flex:1;display:flex;gap:6px;overflow-x:auto;min-height:84px;align-items:center;
+    padding:6px;border:2px dashed #d1d5db;border-radius:var(--radius)}
+  .sentence:empty::before{content:"Tap pictures to build a sentence";color:var(--muted);padding-left:8px}
+  .chip{flex:0 0 auto;display:flex;flex-direction:column;align-items:center;justify-content:center;
+    width:70px;height:70px;border-radius:12px;background:var(--c,#eee);font-size:.75rem;font-weight:600}
+  .chip .pic{font-size:32px;line-height:1;height:40px;display:flex;align-items:center}
+  .chip img{max-width:56px;max-height:40px;object-fit:contain}
+  .strip button{min-width:64px;font-size:1.4rem;background:#e5e7eb}
+  #speakAll{background:#16a34a;color:#fff;font-weight:700;font-size:1.1rem;min-width:96px}
+
+  /* Category tabs */
+  nav{display:flex;gap:8px;padding:10px;overflow-x:auto}
+  nav button{padding:12px 18px;font-size:1.05rem;font-weight:600;background:#e5e7eb;white-space:nowrap}
+  nav button.active{background:var(--accent);color:#fff}
+  nav .add-cat{background:transparent;border:2px dashed #9ca3af;color:var(--muted)}
+
+  /* Tile grid */
+  main{flex:1;overflow-y:auto;padding:4px 10px 10px;display:grid;gap:10px;align-content:start;
+    grid-template-columns:repeat(auto-fill,minmax(var(--tile-size),1fr))}
+  .tile{position:relative;aspect-ratio:1/1;display:flex;flex-direction:column;align-items:center;
+    justify-content:center;gap:6px;padding:8px;background:var(--c,#fff);
+    border:3px solid rgba(0,0,0,.12);border-radius:var(--radius);
+    box-shadow:0 2px 4px rgba(0,0,0,.08);transition:transform .08s}
+  .tile:active{transform:scale(.95)}
+  .tile .pic{flex:1;width:100%;display:flex;align-items:center;justify-content:center;
+    font-size:clamp(40px,7vw,64px);line-height:1;min-height:0}
+  .tile img{max-width:100%;max-height:100%;object-fit:contain;border-radius:8px}
+  .tile .label{font-weight:700;font-size:clamp(.9rem,1.8vw,1.15rem);text-align:center}
+  .tile .badge{position:absolute;top:6px;right:8px;font-size:.9rem;opacity:.7}
+  .tile.speaking{outline:4px solid var(--accent)}
+  .add-tile{background:transparent;border:3px dashed #9ca3af;color:var(--muted);font-size:1.1rem;font-weight:600}
+  body:not(.editing) .add-tile, body:not(.editing) .add-cat{display:none}
+  body.editing .tile:not(.add-tile){outline:3px dashed var(--accent);outline-offset:-6px}
+
+  /* Footer */
+  footer{display:flex;gap:8px;padding:8px 10px;background:var(--panel);border-top:1px solid #e5e7eb;flex-wrap:wrap;align-items:center}
+  footer button,footer label{padding:10px 14px;background:#e5e7eb;border-radius:12px;font-size:.95rem;cursor:pointer}
+  #editToggle{position:relative;overflow:hidden}
+  #editToggle .fill{position:absolute;inset:0;background:rgba(37,99,235,.3);transform:scaleX(0);transform-origin:left}
+  body.editing #editToggle{background:var(--accent);color:#fff}
+  .edit-only{display:none}
+  body.editing .edit-only{display:inline-block}
+  .hint{color:var(--muted);font-size:.85rem;margin-left:auto}
+
+  /* Editor dialog */
+  dialog{border:none;border-radius:20px;padding:0;width:min(560px,94vw);max-height:92vh;user-select:text}
+  dialog::backdrop{background:rgba(0,0,0,.45)}
+  .ed{padding:20px;display:flex;flex-direction:column;gap:14px;overflow-y:auto;max-height:92vh}
+  .ed h2{margin:0}
+  .ed label{display:flex;flex-direction:column;gap:4px;font-weight:600;font-size:.9rem}
+  .ed input[type=text],.ed input[type=url],.ed select{padding:10px;font:inherit;border:1px solid #d1d5db;border-radius:10px}
+  .ed fieldset{border:1px solid #e5e7eb;border-radius:12px;display:flex;flex-direction:column;gap:10px}
+  .ed legend{font-weight:700;padding:0 6px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .ed button{padding:10px 14px;background:#e5e7eb}
+  .ed .primary{background:var(--accent);color:#fff;font-weight:700}
+  .ed .danger{background:var(--danger);color:#fff}
+  .preview{width:110px;height:110px;border-radius:14px;border:2px solid #e5e7eb;display:flex;
+    align-items:center;justify-content:center;font-size:56px;background:#fafafa;overflow:hidden}
+  .preview img{max-width:100%;max-height:100%;object-fit:contain}
+  .swatches{display:flex;gap:6px;flex-wrap:wrap}
+  .swatch{width:36px;height:36px;border-radius:50%;border:3px solid transparent}
+  .swatch.sel{border-color:var(--ink)}
+  .rec{background:#fee2e2 !important}
+  .rec.on{background:var(--danger) !important;color:#fff}
+  .small{font-size:.8rem;color:var(--muted);font-weight:400}
+</style>
+</head>
+<body>
+
+<header class="strip">
+  <div id="sentence" class="sentence" aria-live="polite"></div>
+  <button id="speakAll" aria-label="Speak sentence">▶ Speak</button>
+  <button id="backspace" aria-label="Remove last word">⌫</button>
+  <button id="clear" aria-label="Clear sentence">✕</button>
+</header>
+
+<nav id="categories"></nav>
+<main id="grid"></main>
+
+<footer>
+  <button id="editToggle"><span class="fill"></span><span class="txt">✏️ Edit (hold)</span></button>
+  <button id="exportBtn" class="edit-only">⬇ Export</button>
+  <label class="edit-only">⬆ Import<input id="importFile" type="file" accept="application/json" hidden></label>
+  <button id="resetBtn" class="edit-only">↺ Reset to default</button>
+  <span class="hint" id="hint">Hold “Edit” for 1.5 s to customise</span>
+</footer>
+
+<dialog id="editor">
+  <form class="ed" method="dialog" id="edForm">
+    <h2 id="edTitle">Edit tile</h2>
+
+    <div class="row" style="align-items:flex-start">
+      <div class="preview" id="edPreview"></div>
+      <div style="flex:1;display:flex;flex-direction:column;gap:10px">
+        <label>Label (shown on tile)<input type="text" id="edLabel" required maxlength="40"></label>
+        <label>Words to speak <span class="small">(optional — defaults to the label)</span>
+          <input type="text" id="edSpeak" maxlength="120"></label>
+      </div>
+    </div>
+
+    <label>Category<select id="edCategory"></select></label>
+
+    <div><b style="font-size:.9rem">Colour</b><div class="swatches" id="edColours"></div></div>
+
+    <fieldset>
+      <legend>🖼 Picture</legend>
+      <div class="row">
+        <label style="flex:1">Upload photo / picture
+          <input type="file" id="edImageFile" accept="image/*"></label>
+      </div>
+      <label>…or image web address / file path<input type="url" id="edImageUrl" placeholder="images/apple.png or https://…"></label>
+      <label>…or emoji<input type="text" id="edEmoji" maxlength="8" placeholder="🍎"></label>
+      <div class="row"><button type="button" id="edRemoveImage">Remove picture</button></div>
+    </fieldset>
+
+    <fieldset>
+      <legend>🔊 Audio</legend>
+      <span class="small" id="edAudioStatus">No custom audio — the device voice will read the words.</span>
+      <div class="row">
+        <button type="button" class="rec" id="edRecord">● Record</button>
+        <button type="button" id="edPlay">▶ Play</button>
+        <button type="button" id="edRemoveAudio">Remove audio</button>
+      </div>
+      <label>…or upload audio file<input type="file" id="edAudioFile" accept="audio/*"></label>
+      <label>…or audio web address / file path<input type="url" id="edAudioUrl" placeholder="audio/apple.mp3 or https://…"></label>
+    </fieldset>
+
+    <div class="row" id="edMoveRow">
+      <button type="button" id="edMoveLeft">◀ Move earlier</button>
+      <button type="button" id="edMoveRight">Move later ▶</button>
+    </div>
+
+    <div class="row" style="justify-content:space-between">
+      <button type="button" class="danger" id="edDelete">🗑 Delete</button>
+      <div class="row">
+        <button type="button" id="edCancel">Cancel</button>
+        <button type="submit" class="primary" id="edSave">Save</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<script>
+/* ===================================================================
+   DEVELOPER SETTINGS
+   =================================================================== */
+const SETTINGS = {
+  lang: 'en-AU',          // preferred text-to-speech language
+  rate: 0.9,              // speech speed (0.5 – 1.5)
+  pitch: 1.1,
+  editHoldMs: 1500,       // how long to hold "Edit" to enter edit mode
+  maxImagePx: 400,        // uploaded images are resized to save storage
+  speakOnTap: true,       // speak each tile when tapped
+  addToSentence: true     // add tapped tiles to the sentence strip
+};
+
+// Modified Fitzgerald Key–style colours (commonly used in AAC)
+const COLOURS = {
+  people:   '#fff3a3', // yellow  – people / pronouns
+  actions:  '#c7f0c2', // green   – verbs
+  describe: '#c9e2ff', // blue    – adjectives / feelings
+  social:   '#ffd1e3', // pink    – social words
+  things:   '#ffd8a8', // orange  – nouns
+  questions:'#e3d4ff', // purple  – questions
+  neutral:  '#ffffff'  // white   – other
+};
+
+/* Starting board. image/audio can be a URL, a relative path
+   (e.g. "images/cat.png"), or left blank to use the emoji + voice. */
+const DEFAULT_BOARD = {
+  categories: ['Core', 'Feelings', 'Food', 'Play', 'People'],
+  tiles: [
+    // Core
+    {label:'I',        emoji:'🙋', category:'Core', color:'people'},
+    {label:'want',     emoji:'🤲', category:'Core', color:'actions'},
+    {label:'more',     emoji:'➕', category:'Core', color:'describe'},
+    {label:'help',     emoji:'🆘', category:'Core', color:'actions'},
+    {label:'stop',     emoji:'✋', category:'Core', color:'actions'},
+    {label:'go',       emoji:'🚦', category:'Core', color:'actions'},
+    {label:'yes',      emoji:'👍', category:'Core', color:'social'},
+    {label:'no',       emoji:'👎', category:'Core', color:'social'},
+    {label:'finished', emoji:'✅', category:'Core', color:'describe', speak:'all finished'},
+    {label:'toilet',   emoji:'🚽', category:'Core', color:'things', speak:'I need the toilet'},
+    {label:'drink',    emoji:'🥤', category:'Core', color:'things'},
+    {label:'what?',    emoji:'❓', category:'Core', color:'questions', speak:'what'},
+    // Feelings
+    {label:'happy',    emoji:'😀', category:'Feelings', color:'describe'},
+    {label:'sad',      emoji:'😢', category:'Feelings', color:'describe'},
+    {label:'angry',    emoji:'😠', category:'Feelings', color:'describe'},
+    {label:'scared',   emoji:'😨', category:'Feelings', color:'describe'},
+    {label:'tired',    emoji:'😴', category:'Feelings', color:'describe'},
+    {label:'sick',     emoji:'🤒', category:'Feelings', color:'describe'},
+    {label:'hurt',     emoji:'🤕', category:'Feelings', color:'describe'},
+    {label:'excited',  emoji:'🤩', category:'Feelings', color:'describe'},
+    // Food
+    {label:'apple',    emoji:'🍎', category:'Food', color:'things'},
+    {label:'banana',   emoji:'🍌', category:'Food', color:'things'},
+    {label:'water',    emoji:'💧', category:'Food', color:'things'},
+    {label:'milk',     emoji:'🥛', category:'Food', color:'things'},
+    {label:'sandwich', emoji:'🥪', category:'Food', color:'things'},
+    {label:'crackers', emoji:'🍘', category:'Food', color:'things'},
+    {label:'eat',      emoji:'🍽️', category:'Food', color:'actions'},
+    {label:'hungry',   emoji:'😋', category:'Food', color:'describe'},
+    // Play
+    {label:'play',     emoji:'🧸', category:'Play', color:'actions'},
+    {label:'outside',  emoji:'🌳', category:'Play', color:'things'},
+    {label:'blocks',   emoji:'🧱', category:'Play', color:'things'},
+    {label:'paint',    emoji:'🎨', category:'Play', color:'actions'},
+    {label:'book',     emoji:'📖', category:'Play', color:'things'},
+    {label:'music',    emoji:'🎵', category:'Play', color:'things'},
+    {label:'sandpit',  emoji:'🏖️', category:'Play', color:'things'},
+    {label:'garden',   emoji:'🌱', category:'Play', color:'things'},
+    {label:'my turn',  emoji:'☝️', category:'Play', color:'social'},
+    {label:'your turn',emoji:'👉', category:'Play', color:'social'},
+    // People
+    {label:'me',       emoji:'🙂', category:'People', color:'people'},
+    {label:'you',      emoji:'🫵', category:'People', color:'people'},
+    {label:'teacher',  emoji:'🧑‍🏫', category:'People', color:'people'},
+    {label:'friend',   emoji:'🧒', category:'People', color:'people'},
+    {label:'mum',      emoji:'👩', category:'People', color:'people'},
+    {label:'dad',      emoji:'👨', category:'People', color:'people'},
+    {label:'hello',    emoji:'👋', category:'People', color:'social'},
+    {label:'bye',      emoji:'👋', category:'People', color:'social', speak:'bye bye'}
+  ]
+};
+
+/* ===================================================================
+   STORAGE (IndexedDB — holds images & audio far better than localStorage)
+   =================================================================== */
+const Store = {
+  _db: null,
+  open(){
+    if (this._db) return Promise.resolve(this._db);
+    return new Promise((res, rej) => {
+      const r = indexedDB.open('aac-talk-board', 1);
+      r.onupgradeneeded = () => r.result.createObjectStore('kv');
+      r.onsuccess = () => { this._db = r.result; res(r.result); };
+      r.onerror = () => rej(r.error);
+    });
+  },
+  async get(key){
+    try {
+      const db = await this.open();
+      return await new Promise((res, rej) => {
+        const q = db.transaction('kv').objectStore('kv').get(key);
+        q.onsuccess = () => res(q.result); q.onerror = () => rej(q.error);
+      });
+    } catch(e){ console.warn('Storage read failed', e); return null; }
+  },
+  async set(key, val){
+    try {
+      const db = await this.open();
+      await new Promise((res, rej) => {
+        const tx = db.transaction('kv', 'readwrite');
+        tx.objectStore('kv').put(val, key);
+        tx.oncomplete = res; tx.onerror = () => rej(tx.error);
+      });
+    } catch(e){ console.warn('Storage write failed', e); alert('Could not save — storage may be full or blocked.'); }
+  }
+};
+
+/* ===================================================================
+   STATE
+   =================================================================== */
+const uid = () => Math.random().toString(36).slice(2, 10);
+const clone = o => JSON.parse(JSON.stringify(o));
+const withIds = b => ({ categories: [...b.categories], tiles: b.tiles.map(t => ({ id: t.id || uid(), ...t })) });
+
+const state = { board: null, category: null, sentence: [], editing: false };
+const save = () => Store.set('board', state.board);
+const colourOf = c => COLOURS[c] || c || COLOURS.neutral;
+
+/* ===================================================================
+   SPEECH & AUDIO
+   =================================================================== */
+let voice = null;
+function pickVoice(){
+  const vs = speechSynthesis.getVoices();
+  voice = vs.find(v => v.lang === SETTINGS.lang) ||
+          vs.find(v => v.lang && v.lang.startsWith(SETTINGS.lang.split('-')[0])) || null;
+}
+if ('speechSynthesis' in window){ pickVoice(); speechSynthesis.onvoiceschanged = pickVoice; }
+
+function sayText(text){
+  return new Promise(res => {
+    if (!('speechSynthesis' in window)) return res();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = SETTINGS.lang; u.rate = SETTINGS.rate; u.pitch = SETTINGS.pitch;
+    if (voice) u.voice = voice;
+    u.onend = u.onerror = () => res();
+    speechSynthesis.speak(u);
+  });
+}
+let currentAudio = null;
+function playTile(t){
+  stopAll();
+  if (t.audio){
+    return new Promise(res => {
+      currentAudio = new Audio(t.audio);
+      currentAudio.onended = currentAudio.onerror = () => res();
+      currentAudio.play().catch(() => sayText(t.speak || t.label).then(res));
+    });
+  }
+  return sayText(t.speak || t.label);
+}
+function stopAll(){
+  if ('speechSynthesis' in window) speechSynthesis.cancel();
+  if (currentAudio){ currentAudio.pause(); currentAudio = null; }
+}
+
+/* ===================================================================
+   RENDERING
+   =================================================================== */
+const $ = id => document.getElementById(id);
+
+function makePic(t, cls='pic'){
+  const d = document.createElement('div'); d.className = cls;
+  if (t.image){ const img = document.createElement('img'); img.src = t.image; img.alt = ''; img.draggable = false; d.append(img); }
+  else d.textContent = t.emoji || '⬜';
+  return d;
+}
+
+function renderCategories(){
+  const nav = $('categories'); nav.innerHTML = '';
+  state.board.categories.forEach(c => {
+    const b = document.createElement('button');
+    b.textContent = c + (state.editing && c === state.category ? ' ✎' : '');
+    b.className = c === state.category ? 'active' : '';
+    b.onclick = () => {
+      if (state.editing && c === state.category) return renameCategory(c);
+      state.category = c; render();
+    };
+    nav.append(b);
+  });
+  const add = document.createElement('button');
+  add.className = 'add-cat'; add.textContent = '+ Category';
+  add.onclick = addCategory;
+  nav.append(add);
+}
+
+function renderGrid(){
+  const grid = $('grid'); grid.innerHTML = '';
+  state.board.tiles.filter(t => t.category === state.category).forEach(t => {
+    const b = document.createElement('button');
+    b.className = 'tile'; b.style.setProperty('--c', colourOf(t.color));
+    b.setAttribute('aria-label', t.label);
+    b.append(makePic(t));
+    const l = document.createElement('span'); l.className = 'label'; l.textContent = t.label; b.append(l);
+    if (t.audio && state.editing){ const s = document.createElement('span'); s.className='badge'; s.textContent='🔊'; b.append(s); }
+    b.onclick = () => state.editing ? openEditor(t) : tapTile(t, b);
+    grid.append(b);
+  });
+  const add = document.createElement('button');
+  add.className = 'tile add-tile'; add.textContent = '+ Add tile';
+  add.onclick = () => openEditor(null);
+  grid.append(add);
+}
+
+function renderSentence(){
+  const s = $('sentence'); s.innerHTML = '';
+  state.sentence.forEach(t => {
+    const c = document.createElement('div'); c.className = 'chip';
+    c.style.setProperty('--c', colourOf(t.color));
+    c.append(makePic(t));
+    const l = document.createElement('span'); l.textContent = t.label; c.append(l);
+    s.append(c);
+  });
+  s.scrollLeft = s.scrollWidth;
+}
+
+function render(){
+  document.body.classList.toggle('editing', state.editing);
+  $('editToggle').querySelector('.txt').textContent = state.editing ? '✔ Done editing' : '✏️ Edit (hold)';
+  $('hint').textContent = state.editing ? 'Tap a tile to edit it. Tap the active category to rename it.' : 'Hold “Edit” for 1.5 s to customise';
+  renderCategories(); renderGrid(); renderSentence();
+}
+
+/* ===================================================================
+   USER ACTIONS
+   =================================================================== */
+function tapTile(t, el){
+  if (SETTINGS.addToSentence){ state.sentence.push(t); renderSentence(); }
+  if (SETTINGS.speakOnTap){
+    el.classList.add('speaking');
+    playTile(t).finally(() => el.classList.remove('speaking'));
+  }
+}
+$('speakAll').onclick = async () => {
+  const words = [...state.sentence]; stopAll();
+  if (!words.some(t => t.audio)) return sayText(words.map(t => t.speak || t.label).join(' '));
+  for (const t of words) await playTile(t);   // custom audio → play each in turn
+};
+$('backspace').onclick = () => { state.sentence.pop(); renderSentence(); };
+$('clear').onclick = () => { state.sentence = []; stopAll(); renderSentence(); };
+
+// Press-and-hold to enter edit mode (tap to leave)
+(() => {
+  const btn = $('editToggle'), fill = btn.querySelector('.fill');
+  let timer = null;
+  const start = e => {
+    e.preventDefault();
+    if (state.editing){ state.editing = false; render(); return; }
+    fill.style.transition = `transform ${SETTINGS.editHoldMs}ms linear`; fill.style.transform = 'scaleX(1)';
+    timer = setTimeout(() => { state.editing = true; cancel(); render(); }, SETTINGS.editHoldMs);
+  };
+  const cancel = () => { clearTimeout(timer); fill.style.transition = 'none'; fill.style.transform = 'scaleX(0)'; };
+  btn.addEventListener('pointerdown', start);
+  ['pointerup','pointerleave','pointercancel'].forEach(ev => btn.addEventListener(ev, cancel));
+  btn.addEventListener('contextmenu', e => e.preventDefault());
+})();
+
+function addCategory(){
+  const name = (prompt('New category name:') || '').trim();
+  if (!name) return;
+  if (state.board.categories.includes(name)) return alert('That category already exists.');
+  state.board.categories.push(name); state.category = name; save(); render();
+}
+function renameCategory(old){
+  const name = prompt(`Rename "${old}" (leave blank to delete it):`, old);
+  if (name === null) return;
+  const n = name.trim();
+  if (!n){
+    const count = state.board.tiles.filter(t => t.category === old).length;
+    if (state.board.categories.length === 1) return alert('You need at least one category.');
+    if (!confirm(`Delete "${old}"${count ? ` and its ${count} tile(s)` : ''}?`)) return;
+    state.board.tiles = state.board.tiles.filter(t => t.category !== old);
+    state.board.categories = state.board.categories.filter(c => c !== old);
+    state.category = state.board.categories[0];
+  } else if (n !== old){
+    if (state.board.categories.includes(n)) return alert('That name is already used.');
+    state.board.categories = state.board.categories.map(c => c === old ? n : c);
+    state.board.tiles.forEach(t => { if (t.category === old) t.category = n; });
+    state.category = n;
+  }
+  save(); render();
+}
+
+/* ===================================================================
+   TILE EDITOR
+   =================================================================== */
+let draft = null, editingId = null, recorder = null;
+
+function openEditor(tile){
+  editingId = tile ? tile.id : null;
+  draft = tile ? clone(tile) : { id: uid(), label: '', emoji: '', category: state.category, color: 'neutral' };
+  $('edTitle').textContent = tile ? 'Edit tile' : 'Add a tile';
+  $('edLabel').value = draft.label;
+  $('edSpeak').value = draft.speak || '';
+  $('edEmoji').value = draft.emoji || '';
+  $('edImageUrl').value = draft.image && !draft.image.startsWith('data:') ? draft.image : '';
+  $('edAudioUrl').value = draft.audio && !draft.audio.startsWith('data:') ? draft.audio : '';
+  $('edImageFile').value = ''; $('edAudioFile').value = '';
+  $('edCategory').innerHTML = '';
+  state.board.categories.forEach(c => $('edCategory').add(new Option(c, c, false, c === draft.category)));
+  $('edDelete').style.visibility = tile ? 'visible' : 'hidden';
+  $('edMoveRow').style.display = tile ? 'flex' : 'none';
+  renderSwatches(); updatePreview(); updateAudioStatus();
+  $('editor').showModal();
+}
+
+function renderSwatches(){
+  const box = $('edColours'); box.innerHTML = '';
+  Object.entries(COLOURS).forEach(([key, hex]) => {
+    const s = document.createElement('button');
+    s.type = 'button'; s.className = 'swatch' + (draft.color === key ? ' sel' : '');
+    s.style.background = hex; s.title = key; s.style.outline = '1px solid #ccc';
+    s.onclick = () => { draft.color = key; renderSwatches(); updatePreview(); };
+    box.append(s);
+  });
+}
+function updatePreview(){
+  const p = $('edPreview'); p.innerHTML = ''; p.style.background = colourOf(draft.color);
+  if (draft.image){ const i = document.createElement('img'); i.src = draft.image; p.append(i); }
+  else p.textContent = draft.emoji || '⬜';
+}
+function updateAudioStatus(){
+  $('edAudioStatus').textContent = draft.audio
+    ? (draft.audio.startsWith('data:') ? '✅ Custom audio saved on this tile.' : '✅ Using audio from: ' + draft.audio)
+    : 'No custom audio — the device voice will read the words.';
+}
+
+const readAsDataURL = file => new Promise((res, rej) => {
+  const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(r.error); r.readAsDataURL(file);
+});
+// Resize uploaded images so the board stays small and fast
+async function resizeImage(file){
+  const src = await readAsDataURL(file);
+  if (file.type === 'image/svg+xml' || file.type === 'image/gif') return src;
+  const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
+  const scale = Math.min(1, SETTINGS.maxImagePx / Math.max(img.width, img.height));
+  const c = document.createElement('canvas');
+  c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+  c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+  return c.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.85);
+}
+
+$('edImageFile').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  draft.image = await resizeImage(f); $('edImageUrl').value = ''; updatePreview();
+};
+$('edImageUrl').oninput = e => { draft.image = e.target.value.trim() || undefined; updatePreview(); };
+$('edEmoji').oninput = e => { draft.emoji = e.target.value.trim(); if (!draft.image) updatePreview(); };
+$('edRemoveImage').onclick = () => { delete draft.image; $('edImageUrl').value = ''; $('edImageFile').value = ''; updatePreview(); };
+
+$('edAudioFile').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  if (f.size > 5 * 1024 * 1024) return alert('Please use an audio file under 5 MB.');
+  draft.audio = await readAsDataURL(f); $('edAudioUrl').value = ''; updateAudioStatus();
+};
+$('edAudioUrl').oninput = e => { draft.audio = e.target.value.trim() || undefined; updateAudioStatus(); };
+$('edRemoveAudio').onclick = () => { delete draft.audio; $('edAudioUrl').value = ''; $('edAudioFile').value = ''; updateAudioStatus(); };
+$('edPlay').onclick = () => {
+  draft.label = $('edLabel').value.trim(); draft.speak = $('edSpeak').value.trim();
+  playTile({ ...draft, label: draft.label || 'no label yet' });
+};
+
+$('edRecord').onclick = async () => {
+  const btn = $('edRecord');
+  if (recorder && recorder.state === 'recording'){ recorder.stop(); return; }
+  if (!navigator.mediaDevices || !window.MediaRecorder)
+    return alert('Recording is not supported here. Open the board over https, or upload an audio file instead.');
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    const chunks = [];
+    recorder = new MediaRecorder(stream);
+    recorder.ondataavailable = e => e.data.size && chunks.push(e.data);
+    recorder.onstop = async () => {
+      stream.getTracks().forEach(t => t.stop());
+      btn.classList.remove('on'); btn.textContent = '● Record';
+      draft.audio = await readAsDataURL(new Blob(chunks, { type: recorder.mimeType || 'audio/webm' }));
+      $('edAudioUrl').value = ''; updateAudioStatus();
+    };
+    recorder.start();
+    btn.classList.add('on'); btn.textContent = '■ Stop recording';
+  } catch(err){ alert('Microphone not available: ' + err.message); }
+};
+
+function closeEditor(){
+  if (recorder && recorder.state === 'recording') recorder.stop();
+  $('editor').close();
+}
+$('edCancel').onclick = closeEditor;
+
+$('edForm').onsubmit = e => {
+  e.preventDefault();
+  const label = $('edLabel').value.trim();
+  if (!label) return $('edLabel').focus();
+  draft.label = label;
+  draft.speak = $('edSpeak').value.trim() || undefined;
+  draft.category = $('edCategory').value;
+  const i = state.board.tiles.findIndex(t => t.id === editingId);
+  if (i >= 0) state.board.tiles[i] = draft; else state.board.tiles.push(draft);
+  state.category = draft.category;
+  save(); closeEditor(); render();
+};
+$('edDelete').onclick = () => {
+  if (!confirm(`Delete the "${draft.label}" tile?`)) return;
+  state.board.tiles = state.board.tiles.filter(t => t.id !== editingId);
+  save(); closeEditor(); render();
+};
+function moveTile(dir){
+  const tiles = state.board.tiles;
+  const same = tiles.map((t, i) => [t, i]).filter(([t]) => t.category === state.category);
+  const pos = same.findIndex(([t]) => t.id === editingId);
+  const target = same[pos + dir]; if (!target) return;
+  const a = same[pos][1], b = target[1];
+  [tiles[a], tiles[b]] = [tiles[b], tiles[a]];
+  save(); render();
+}
+$('edMoveLeft').onclick = () => moveTile(-1);
+$('edMoveRight').onclick = () => moveTile(1);
+
+/* ===================================================================
+   EXPORT / IMPORT / RESET
+   =================================================================== */
+$('exportBtn').onclick = () => {
+  const blob = new Blob([JSON.stringify(state.board, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `aac-board-${new Date().toISOString().slice(0,10)}.json`;
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+$('importFile').onchange = async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    const data = JSON.parse(await f.text());
+    if (!Array.isArray(data.categories) || !Array.isArray(data.tiles)) throw new Error('Not a board file');
+    if (!confirm('Replace the current board with the imported one?')) return;
+    state.board = withIds(data); state.category = state.board.categories[0];
+    state.sentence = []; save(); render();
+  } catch(err){ alert('Could not import: ' + err.message); }
+  e.target.value = '';
+};
+$('resetBtn').onclick = () => {
+  if (!confirm('Reset to the default board? Your custom tiles, pictures and audio will be removed (export first to keep a copy).')) return;
+  state.board = withIds(clone(DEFAULT_BOARD)); state.category = state.board.categories[0];
+  state.sentence = []; save(); render();
+};
+
+/* ===================================================================
+   START
+   =================================================================== */
+(async () => {
+  const saved = await Store.get('board');
+  state.board = saved && saved.tiles ? saved : withIds(clone(DEFAULT_BOARD));
+  state.category = state.board.categories[0];
+  render();
+})();
+</script>
+</body>
+</html>
